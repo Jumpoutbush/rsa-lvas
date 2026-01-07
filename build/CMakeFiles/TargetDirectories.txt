@@ -1,4 +1,8 @@
 /home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/rsa_lvas.dir
+/home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/pki_lvas.dir
+/home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/pki_timespace.dir
 /home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/example.dir
+/home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/pki_demo.dir
+/home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/timespace_demo.dir
 /home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/edit_cache.dir
 /home/yucyang/wkspace/rsa-lvas/build/CMakeFiles/rebuild_cache.dir

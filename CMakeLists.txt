@@ -13,15 +13,38 @@ find_package(OpenSSL REQUIRED)
 add_library(rsa_lvas STATIC
   rsa_lvas.cpp
 )
+# ---- PKI module (LVAS Directory PKI demo) ----
+add_library(pki_lvas STATIC
+  pki_lvas.cpp
+)
+# ---- Time-Space Tradeoff PKI module ----
+add_library(pki_timespace STATIC
+  pki_timespace.cpp
+)
 
 target_include_directories(rsa_lvas
   PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
 )
+target_include_directories(pki_lvas PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_include_directories(pki_timespace PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}
+)
 
 target_link_libraries(rsa_lvas
   PUBLIC
     OpenSSL::Crypto
+)
+target_link_libraries(pki_lvas PUBLIC
+  rsa_lvas
+  OpenSSL::Crypto
+)
+target_link_libraries(pki_timespace PUBLIC
+  pki_lvas
+  rsa_lvas
+  OpenSSL::Crypto
 )
 
 # Reasonable warnings (optional)
@@ -35,8 +58,21 @@ endif()
 add_executable(example
   example.cpp
 )
-
 target_link_libraries(example
   PRIVATE
     rsa_lvas
+)
+
+add_executable(pki_demo
+  pki_demo.cpp
+)
+target_link_libraries(pki_demo PRIVATE
+  pki_lvas
+)
+
+add_executable(timespace_demo
+  timespace_demo.cpp
+)
+target_link_libraries(timespace_demo PRIVATE
+  pki_timespace
 )

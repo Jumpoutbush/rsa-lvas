@@ -16,7 +16,8 @@ int main() {
   log.RegisterCA(ca.id(), ca.public_key());
 
   // 3) CA issues a leaf "cert record"
-  std::vector<uint8_t> ee_pubkey = {'d','e','m','o','-','p','k'};
+  auto ee_kp = rsa_lvas::KeyGen(params);
+  std::vector<uint8_t> ee_pubkey = rsa_lvas::SerializePublicKey(ee_kp.first);
   auto issued = ca.IssueLeaf("example.com", ee_pubkey, /*nb=*/1700000000, /*na=*/1900000000);
 
   // 4) CA submits signed record hash to log

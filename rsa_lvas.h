@@ -21,7 +21,7 @@ inline BytesView View(const std::string& s) { return {reinterpret_cast<const uin
 
 // -------------------- params --------------------
 struct Params {
-    int rsa_bits = 2048;        // RSA modulus size
+    int rsa_bits = 3072;        // RSA modulus size
     int prime_bits = 256;       // hash-to-prime output size
     int mr_checks = 64;         // Miller-Rabin rounds for primality test
     size_t seed_bytes = 32;     // public "samp_seed" length

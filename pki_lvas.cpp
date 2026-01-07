@@ -148,7 +148,7 @@ IssuerCA::Issued IssuerCA::IssueLeaf(const std::string& dns,
 DirectoryLog::DirectoryLog(rsa_lvas::Params params) : params_(params) {}
 
 void DirectoryLog::RegisterCA(const std::string& ca_id, const rsa_lvas::PublicKey& pk) {
-  ca_pk_[ca_id] = pk; // requires BigNum deep-copy (you already fixed)
+  ca_pk_[ca_id] = pk; 
 }
 
 void DirectoryLog::SubmitRecord(const std::string& ca_id,
@@ -196,7 +196,6 @@ void DirectoryLog::CloseEpoch() {
 
     latest_[ca_id] = std::move(st);
 
-    // forget individual signatures / pending
     p.messages.clear();
     p.sigs.clear();
   }

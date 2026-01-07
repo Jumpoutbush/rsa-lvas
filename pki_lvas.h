@@ -20,7 +20,7 @@ struct LeafRecord {
   std::string issuer_ca_id;        // e.g. "CA1"
   uint64_t not_before = 0;         // unix seconds
   uint64_t not_after = 0;          // unix seconds
-  std::vector<uint8_t> ee_pubkey;  // demo bytes
+  std::vector<uint8_t> ee_pubkey;  // serialized public key bytes
 };
 
 std::vector<uint8_t> EncodeLeafRecord(const LeafRecord& r);

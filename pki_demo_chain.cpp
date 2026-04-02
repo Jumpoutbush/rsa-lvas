@@ -9,7 +9,7 @@
 
 // ---------------- CARecord: "CA certificate" analogue ----------------
 struct CARecord {
-  std::string issuer_ca_id;                  // who signs this record (parent CA)
+  std::string issuer_ca_id;                  // parent CA id (signer)
   std::string subject_ca_id;                 // child CA id
   std::vector<uint8_t> subject_pk_blob;      // SerializePublicKey(child_pk)
   uint64_t not_before = 0;
@@ -17,7 +17,7 @@ struct CARecord {
   uint32_t path_len   = 0;                   // simplified constraint
 };
 
-// minimal TLV helpers (self-contained)
+// --- minimal TLV helpers ---
 static void put_u32(std::vector<uint8_t>& out, uint32_t x) {
   out.push_back((x >> 24) & 0xFF);
   out.push_back((x >> 16) & 0xFF);
@@ -76,7 +76,6 @@ static std::vector<uint8_t> EncodeCARecord(const CARecord& r) {
   put_u32(out, r.path_len);
   return out;
 }
-
 static CARecord DecodeCARecord(const std::vector<uint8_t>& bytes) {
   if (bytes.size() < 5) throw std::runtime_error("CARecord too short");
   if (!(bytes[0]=='C' && bytes[1]=='A' && bytes[2]=='R' && bytes[3]=='E'))
@@ -101,7 +100,6 @@ struct CA {
   rsa_lvas::PublicKey pk;
   rsa_lvas::SecretKey sk;
 };
-
 static CA MakeCA(const std::string& id, const rsa_lvas::Params& params) {
   CA ca;
   ca.id = id;
@@ -121,16 +119,10 @@ static rsa_lvas::Signature SignRecord(const CA& issuer,
 
 // ---------------- Handshake payload (server -> browser) ----------------
 struct HandshakePayload {
-  // chain records, from top to bottom:
-  //   0: CARecord Root -> Intermediate
-  //   1: CARecord Intermediate -> Issuing
-  //   2: LeafRecord Issuing -> End-Entity
   std::vector<uint8_t> ca_record_root_to_inter;
   std::vector<uint8_t> ca_record_inter_to_issuing;
   std::vector<uint8_t> leaf_record;
 
-  // stapled aux signatures for each record, serialized
-  // aux is treated as a "normal signature" under RSA-LVAS Verify
   std::vector<uint8_t> aux_root_to_inter;
   std::vector<uint8_t> aux_inter_to_issuing;
   std::vector<uint8_t> aux_leaf;
@@ -140,123 +132,207 @@ struct HandshakePayload {
 
 int main() {
   rsa_lvas::Params params;
-  params.rsa_bits = 2048;
+  params.rsa_bits = 3072;
   params.prime_bits = 256;
 
-  // --- 1) Build a traditional-style CA hierarchy (3 layers) ---
+  // ---------------- Scale knobs ----------------
+  constexpr size_t NUM_INTER = 2;
+  constexpr size_t NUM_ISS_PER_INTER = 5;
+  // 为了更明显体现 LVAS：每个 issuing 生成不少 leaf
+  constexpr size_t LEAVES_PER_ISSUING = 80; // 你可调大到 500/1000 观察差异
+  constexpr uint64_t NB = 1700000000;
+  constexpr uint64_t NA = 1900000000;
+
+  // ---------------- 1) Build CA hierarchy ----------------
   CA root = MakeCA("RootCA", params);
-  CA inter = MakeCA("InterCA", params);
-  CA issuing = MakeCA("IssuingCA", params);
 
-  // --- 2) Construct CARecords (like CA certificates) ---
-  CARecord r_root_inter;
-  r_root_inter.issuer_ca_id = root.id;
-  r_root_inter.subject_ca_id = inter.id;
-  r_root_inter.subject_pk_blob = rsa_lvas::SerializePublicKey(inter.pk);
-  r_root_inter.not_before = 1700000000;
-  r_root_inter.not_after  = 1900000000;
-  r_root_inter.path_len   = 1;
+  std::vector<CA> inters;
+  inters.reserve(NUM_INTER);
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    inters.push_back(MakeCA("InterCA" + std::to_string(i), params));
+  }
 
-  auto bytes_root_inter = EncodeCARecord(r_root_inter);
-  auto sig_root_inter   = SignRecord(root, bytes_root_inter, params);
+  // issuing[inter_idx][iss_idx]
+  std::vector<std::vector<CA>> issuing(NUM_INTER);
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    issuing[i].reserve(NUM_ISS_PER_INTER);
+    for (size_t j = 0; j < NUM_ISS_PER_INTER; j++) {
+      issuing[i].push_back(MakeCA("IssuingCA_" + std::to_string(i) + "_" + std::to_string(j), params));
+    }
+  }
 
-  CARecord r_inter_iss;
-  r_inter_iss.issuer_ca_id = inter.id;
-  r_inter_iss.subject_ca_id = issuing.id;
-  r_inter_iss.subject_pk_blob = rsa_lvas::SerializePublicKey(issuing.pk);
-  r_inter_iss.not_before = 1700000000;
-  r_inter_iss.not_after  = 1900000000;
-  r_inter_iss.path_len   = 0;
-
-  auto bytes_inter_iss = EncodeCARecord(r_inter_iss);
-  auto sig_inter_iss   = SignRecord(inter, bytes_inter_iss, params);
-
-  // --- 3) Construct LeafRecord (end-entity "certificate") ---
-  pki_lvas::LeafRecord leaf;
-  leaf.dns = "example.com";
-  leaf.issuer_ca_id = issuing.id;
-  leaf.not_before = 1700000000;
-  leaf.not_after  = 1900000000;
-  leaf.ee_pubkey = {'e','e','-','p','k'};
-
-  auto bytes_leaf = pki_lvas::EncodeLeafRecord(leaf);
-  auto sig_leaf   = SignRecord(issuing, bytes_leaf, params);
-
-  // --- 4) Directory Log collects & aggregates per-CA (RSA-LVAS magic happens here) ---
+  // ---------------- 2) Directory log register all CA public keys ----------------
   pki_lvas::DirectoryLog log(params);
+
   log.RegisterCA(root.id, root.pk);
-  log.RegisterCA(inter.id, inter.pk);
-  log.RegisterCA(issuing.id, issuing.pk);
+  for (auto& ic : inters) log.RegisterCA(ic.id, ic.pk);
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    for (size_t j = 0; j < NUM_ISS_PER_INTER; j++) {
+      log.RegisterCA(issuing[i][j].id, issuing[i][j].pk);
+    }
+  }
 
-  // submit signed hashes (m) to log under the issuer CA id
-  auto m_root_inter = pki_lvas::Sha256(bytes_root_inter);
-  auto m_inter_iss  = pki_lvas::Sha256(bytes_inter_iss);
-  auto m_leaf       = pki_lvas::Sha256(bytes_leaf);
+  // ---------------- 3) Root issues InterCA records; Inter issues Issuing records ----------------
+  // 保存每条 CARecord bytes 以便后续挑选链
+  std::vector<std::vector<uint8_t>> bytes_root_to_inter(NUM_INTER);
+  std::vector<std::vector<std::vector<uint8_t>>> bytes_inter_to_iss(NUM_INTER,
+      std::vector<std::vector<uint8_t>>(NUM_ISS_PER_INTER));
 
-  log.SubmitRecord(root.id,   m_root_inter, sig_root_inter);
-  log.SubmitRecord(inter.id,  m_inter_iss,  sig_inter_iss);
-  log.SubmitRecord(issuing.id,m_leaf,       sig_leaf);
+  // (a) Root -> each Inter
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    CARecord rec;
+    rec.issuer_ca_id = root.id;
+    rec.subject_ca_id = inters[i].id;
+    rec.subject_pk_blob = rsa_lvas::SerializePublicKey(inters[i].pk);
+    rec.not_before = NB;
+    rec.not_after = NA;
+    rec.path_len = 1; // can issue sub-CA
 
+    auto bytes = EncodeCARecord(rec);
+    auto sig = SignRecord(root, bytes, params);
+
+    auto m = pki_lvas::Sha256(bytes);
+    log.SubmitRecord(root.id, m, sig);
+
+    bytes_root_to_inter[i] = std::move(bytes);
+  }
+
+  // (b) Inter -> each Issuing under it
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    for (size_t j = 0; j < NUM_ISS_PER_INTER; j++) {
+      CARecord rec;
+      rec.issuer_ca_id = inters[i].id;
+      rec.subject_ca_id = issuing[i][j].id;
+      rec.subject_pk_blob = rsa_lvas::SerializePublicKey(issuing[i][j].pk);
+      rec.not_before = NB;
+      rec.not_after = NA;
+      rec.path_len = 0; // issuing should not create more CAs
+
+      auto bytes = EncodeCARecord(rec);
+      auto sig = SignRecord(inters[i], bytes, params);
+
+      auto m = pki_lvas::Sha256(bytes);
+      log.SubmitRecord(inters[i].id, m, sig);
+
+      bytes_inter_to_iss[i][j] = std::move(bytes);
+    }
+  }
+
+  // ---------------- 4) Issuing issues many leaf records ----------------
+  // 保存所有 leaf，方便挑一个来模拟“服务器握手”
+  struct LeafEntry {
+    size_t inter_idx;
+    size_t iss_idx;
+    size_t leaf_idx;
+    std::string dns;
+    std::vector<uint8_t> leaf_bytes;
+  };
+  std::vector<LeafEntry> all_leaves;
+  all_leaves.reserve(NUM_INTER * NUM_ISS_PER_INTER * LEAVES_PER_ISSUING);
+
+  for (size_t i = 0; i < NUM_INTER; i++) {
+    for (size_t j = 0; j < NUM_ISS_PER_INTER; j++) {
+      for (size_t k = 0; k < LEAVES_PER_ISSUING; k++) {
+        pki_lvas::LeafRecord leaf;
+        leaf.dns = "site-" + std::to_string(i) + "-" + std::to_string(j) + "-" + std::to_string(k) + ".example.com";
+        leaf.issuer_ca_id = issuing[i][j].id;
+        leaf.not_before = NB;
+        leaf.not_after = NA;
+        leaf.ee_pubkey = {'e','e','-', (uint8_t)i, (uint8_t)j, (uint8_t)k};
+
+        auto bytes = pki_lvas::EncodeLeafRecord(leaf);
+        auto sig = SignRecord(issuing[i][j], bytes, params);
+
+        auto m = pki_lvas::Sha256(bytes);
+        log.SubmitRecord(issuing[i][j].id, m, sig);
+
+        all_leaves.push_back({i, j, k, leaf.dns, std::move(bytes)});
+      }
+    }
+  }
+
+  // ---------------- 5) Close epoch => Log aggregates per-CA ----------------
   log.CloseEpoch();
   uint64_t epoch = log.current_epoch();
 
-  // --- 5) Server staples aux for each record (instead of sending raw cert signatures) ---
-  rsa_lvas::Signature aux_root_inter = log.GetAuxLatest(root.id, m_root_inter);
-  rsa_lvas::Signature aux_inter_iss  = log.GetAuxLatest(inter.id, m_inter_iss);
-  rsa_lvas::Signature aux_leaf_sig   = log.GetAuxLatest(issuing.id, m_leaf);
+  // ---------------- 6) Pick ONE leaf to simulate "server stapling chain" ----------------
+  // 你可以换成随机选择；这里固定挑一个，便于复现实验
+  const LeafEntry& target = all_leaves.at((NUM_INTER * NUM_ISS_PER_INTER * LEAVES_PER_ISSUING) / 2);
+
+  const auto& bytes_r_i = bytes_root_to_inter[target.inter_idx];
+  const auto& bytes_i_s = bytes_inter_to_iss[target.inter_idx][target.iss_idx];
+  const auto& bytes_leaf = target.leaf_bytes;
+
+  auto m_r_i = pki_lvas::Sha256(bytes_r_i);
+  auto m_i_s = pki_lvas::Sha256(bytes_i_s);
+  auto m_l   = pki_lvas::Sha256(bytes_leaf);
+
+  // Log provides aux (LocalOpen) for each record
+  rsa_lvas::Signature aux_r_i = log.GetAuxLatest(root.id, m_r_i);
+  rsa_lvas::Signature aux_i_s = log.GetAuxLatest(inters[target.inter_idx].id, m_i_s);
+  rsa_lvas::Signature aux_l   = log.GetAuxLatest(issuing[target.inter_idx][target.iss_idx].id, m_l);
 
   HandshakePayload hs;
-  hs.ca_record_root_to_inter = bytes_root_inter;
-  hs.ca_record_inter_to_issuing = bytes_inter_iss;
+  hs.ca_record_root_to_inter = bytes_r_i;
+  hs.ca_record_inter_to_issuing = bytes_i_s;
   hs.leaf_record = bytes_leaf;
 
-  hs.aux_root_to_inter = rsa_lvas::SerializeSignature(aux_root_inter);
-  hs.aux_inter_to_issuing = rsa_lvas::SerializeSignature(aux_inter_iss);
-  hs.aux_leaf = rsa_lvas::SerializeSignature(aux_leaf_sig);
+  hs.aux_root_to_inter = rsa_lvas::SerializeSignature(aux_r_i);
+  hs.aux_inter_to_issuing = rsa_lvas::SerializeSignature(aux_i_s);
+  hs.aux_leaf = rsa_lvas::SerializeSignature(aux_l);
   hs.epoch = epoch;
 
-  // --- 6) Browser verifies chain using ONLY Verify(pk, hash(record), aux) ---
-  // Trust anchor: root pk is in trust store
+  // ---------------- 7) Browser verifies chain (trust anchor = root pk) ----------------
   rsa_lvas::PublicKey trusted_root_pk = root.pk;
 
-  // (a) Verify Root -> Inter CARecord
-  auto aux1 = rsa_lvas::DeserializeSignature(hs.aux_root_to_inter);
-  auto m1 = pki_lvas::Sha256(hs.ca_record_root_to_inter);
-  bool ok1 = rsa_lvas::Verify(trusted_root_pk, rsa_lvas::BytesView{m1.data(), m1.size()}, aux1, params);
-  if (!ok1) {
-    std::cerr << "Chain verify failed at Root->Inter\n";
-    return 1;
+  // (a) Verify Root -> Inter
+  {
+    auto aux = rsa_lvas::DeserializeSignature(hs.aux_root_to_inter);
+    auto m = pki_lvas::Sha256(hs.ca_record_root_to_inter);
+    bool ok = rsa_lvas::Verify(trusted_root_pk, rsa_lvas::BytesView{m.data(), m.size()}, aux, params);
+    if (!ok) { std::cerr << "Fail at Root->Inter\n"; return 1; }
   }
   CARecord parsed1 = DecodeCARecord(hs.ca_record_root_to_inter);
   rsa_lvas::PublicKey inter_pk_from_record = rsa_lvas::DeserializePublicKey(parsed1.subject_pk_blob);
 
-  // (b) Verify Inter -> Issuing CARecord
-  auto aux2 = rsa_lvas::DeserializeSignature(hs.aux_inter_to_issuing);
-  auto m2 = pki_lvas::Sha256(hs.ca_record_inter_to_issuing);
-  bool ok2 = rsa_lvas::Verify(inter_pk_from_record, rsa_lvas::BytesView{m2.data(), m2.size()}, aux2, params);
-  if (!ok2) {
-    std::cerr << "Chain verify failed at Inter->Issuing\n";
-    return 1;
+  // (b) Verify Inter -> Issuing
+  {
+    auto aux = rsa_lvas::DeserializeSignature(hs.aux_inter_to_issuing);
+    auto m = pki_lvas::Sha256(hs.ca_record_inter_to_issuing);
+    bool ok = rsa_lvas::Verify(inter_pk_from_record, rsa_lvas::BytesView{m.data(), m.size()}, aux, params);
+    if (!ok) { std::cerr << "Fail at Inter->Issuing\n"; return 1; }
   }
   CARecord parsed2 = DecodeCARecord(hs.ca_record_inter_to_issuing);
   rsa_lvas::PublicKey issuing_pk_from_record = rsa_lvas::DeserializePublicKey(parsed2.subject_pk_blob);
 
-  // (c) Verify Issuing -> LeafRecord
-  auto aux3 = rsa_lvas::DeserializeSignature(hs.aux_leaf);
-  auto m3 = pki_lvas::Sha256(hs.leaf_record);
-  bool ok3 = rsa_lvas::Verify(issuing_pk_from_record, rsa_lvas::BytesView{m3.data(), m3.size()}, aux3, params);
-  if (!ok3) {
-    std::cerr << "Chain verify failed at Issuing->Leaf\n";
-    return 1;
+  // (c) Verify Issuing -> Leaf
+  {
+    auto aux = rsa_lvas::DeserializeSignature(hs.aux_leaf);
+    auto m = pki_lvas::Sha256(hs.leaf_record);
+    bool ok = rsa_lvas::Verify(issuing_pk_from_record, rsa_lvas::BytesView{m.data(), m.size()}, aux, params);
+    if (!ok) { std::cerr << "Fail at Issuing->Leaf\n"; return 1; }
   }
 
-  // semantic check: DNS
   auto leaf_parsed = pki_lvas::DecodeLeafRecord(hs.leaf_record);
-  if (leaf_parsed.dns != "example.com") {
+  if (leaf_parsed.dns != target.dns) {
     std::cerr << "DNS mismatch\n";
     return 1;
   }
 
-  std::cout << "Multi-CA PKI demo verify ok? YES (epoch=" << hs.epoch << ")\n";
+  // ---------------- 8) Print stats to highlight LVAS signature advantage ----------------
+  const size_t num_ca_records = NUM_INTER + NUM_INTER * NUM_ISS_PER_INTER;
+  const size_t num_leaf_records = NUM_INTER * NUM_ISS_PER_INTER * LEAVES_PER_ISSUING;
+  const size_t total_records = num_ca_records + num_leaf_records;
+
+  const size_t num_cas = 1 + NUM_INTER + (NUM_INTER * NUM_ISS_PER_INTER); // root + inter + issuing
+  std::cout << "OK: verify chain for " << target.dns << " (epoch=" << hs.epoch << ")\n";
+  std::cout << "Records submitted: CARecords=" << num_ca_records
+            << ", LeafRecords=" << num_leaf_records
+            << ", total=" << total_records << "\n";
+  std::cout << "Traditional PKI would have ~" << total_records
+            << " individual signatures stored/distributed.\n";
+  std::cout << "LVAS Log stores ~1 aggregate signature per CA per epoch => "
+            << num_cas << " aggregate signatures (plus message index).\n";
+
   return 0;
 }

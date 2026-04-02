@@ -70,11 +70,13 @@ target_link_libraries(pki_demo PRIVATE
   pki_lvas
 )
 
-add_executable(timespace_demo
-  timespace_demo.cpp
+add_executable(pki_demo_chain_timespace
+  pki_demo_chain_timespace.cpp
 )
-target_link_libraries(timespace_demo PRIVATE
-  pki_timespace
+target_link_libraries(pki_demo_chain_timespace PRIVATE
+  pki_lvas
+  rsa_lvas
+  OpenSSL::Crypto
 )
 
 add_executable(pki_demo_chain

@@ -5,7 +5,7 @@
 
 int main() {
   rsa_lvas::Params params;
-  params.rsa_bits = 2048;
+  params.rsa_bits = 3072;
   params.prime_bits = 256;
 
   // 1) Issuer CA
@@ -28,7 +28,7 @@ int main() {
 
   // 6) Web server staples aux for its record
   pki_lvas::WebServer server(ca.id(), issued.record, issued.record_bytes);
-  server.RefreshStaple(log);
+  server.RefreshStaple(log);  // Call LocalOpen
   auto hs = server.MakeHandshakePayload();
 
   // 7) Browser trusts CA pk (in real PKI: would be via root chain)
